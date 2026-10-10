@@ -1,268 +1,356 @@
+#include <errno.h>
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <errno.h>
 
+#define COEFFICIENTS_COUNT 3
 #define PERMUTATIONS_COUNT 6
 
 typedef enum {
-    OK = 0,
-    ERR_ARGS_COUNT,
-    ERR_FLAG,
-    ERR_NUMBER,
-    ERR_EPS,
-    ERR_ZERO,
-    ERR_SIDE
+    STATUS_OK,
+    STATUS_INVALID_ARGS_COUNT,
+    STATUS_INVALID_FLAG,
+    STATUS_INVALID_NUMBER,
+    STATUS_INVALID_EPS,
+    STATUS_INVALID_VALUE,
+    STATUS_OVERFLOW
 } status_t;
 
 typedef enum {
     SOLUTION_NONE,
+    SOLUTION_ANY,
     SOLUTION_ONE,
-    SOLUTION_TWO,
-    SOLUTION_ANY
+    SOLUTION_TWO_REAL,
+    SOLUTION_COMPLEX_PAIR
 } solution_kind_t;
 
 typedef struct {
     solution_kind_t kind;
-    double roots[2];
+    double first;
+    double second;
 } solution_t;
 
-static status_t parse_flag(const char *arg, char *flag)
+static const char *status_message(status_t status)
 {
-    if (arg == NULL || strlen(arg) != 2 || (arg[0] != '-' && arg[0] != '/'))
-        return ERR_FLAG;
-    *flag = arg[1];
-    return OK;
+    switch (status) {
+    case STATUS_OK:
+        return "ok";
+    case STATUS_INVALID_ARGS_COUNT:
+        return "wrong number of arguments for this flag";
+    case STATUS_INVALID_FLAG:
+        return "unknown flag";
+    case STATUS_INVALID_NUMBER:
+        return "argument is not a valid number";
+    case STATUS_INVALID_EPS:
+        return "epsilon must be a positive number";
+    case STATUS_INVALID_VALUE:
+        return "value is not allowed for this flag";
+    case STATUS_OVERFLOW:
+        return "numeric overflow";
+    }
+    return "unknown error";
 }
 
-static status_t parse_double(const char *text, double *number)
+static status_t parse_double(const char *text, double *value)
 {
-    char *end;
-
-    if (text == NULL || *text == '\0')
-        return ERR_NUMBER;
+    if (text == NULL || value == NULL || *text == '\0') {
+        return STATUS_INVALID_NUMBER;
+    }
+    char *end = NULL;
     errno = 0;
-    *number = strtod(text, &end);
-    if (errno != 0 || *end != '\0' || !isfinite(*number))
-        return ERR_NUMBER;
-    return OK;
+    double result = strtod(text, &end);
+    if (errno == ERANGE || *end != '\0' || !isfinite(result)) {
+        return STATUS_INVALID_NUMBER;
+    }
+    *value = result;
+    return STATUS_OK;
 }
 
 static status_t parse_eps(const char *text, double *eps)
 {
-    if (parse_double(text, eps) != OK || *eps <= 0)
-        return ERR_EPS;
-    return OK;
+    double value = 0.0;
+    status_t status = parse_double(text, &value);
+    if (status != STATUS_OK) {
+        return status;
+    }
+    if (value <= 0.0) {
+        return STATUS_INVALID_EPS;
+    }
+    *eps = value;
+    return STATUS_OK;
 }
 
-static status_t parse_integer(const char *text, long long *number)
+static status_t parse_int64(const char *text, int64_t *value)
 {
-    char *end;
-
-    if (text == NULL || *text == '\0')
-        return ERR_NUMBER;
+    if (text == NULL || value == NULL || *text == '\0') {
+        return STATUS_INVALID_NUMBER;
+    }
+    char *end = NULL;
     errno = 0;
-    *number = strtoll(text, &end, 10);
-    if (errno != 0 || *end != '\0')
-        return ERR_NUMBER;
-    return OK;
+    long long result = strtoll(text, &end, 10);
+    if (errno == ERANGE || *end != '\0') {
+        return STATUS_INVALID_NUMBER;
+    }
+    *value = (int64_t)result;
+    return STATUS_OK;
 }
 
-static solution_t solve_quadratic(const double a, const double b, const double c, const double eps)
+static status_t parse_flag(const char *argument, char *flag)
 {
-    solution_t solution = {SOLUTION_NONE, {0, 0}};
-    double discriminant;
+    if (argument == NULL || flag == NULL) {
+        return STATUS_INVALID_FLAG;
+    }
+    if ((argument[0] != '-' && argument[0] != '/') || argument[1] == '\0' ||
+        argument[2] != '\0') {
+        return STATUS_INVALID_FLAG;
+    }
+    *flag = argument[1];
+    return STATUS_OK;
+}
 
-    if (fabs(a) < eps) {
-        if (fabs(b) < eps) {
-            solution.kind = fabs(c) < eps ? SOLUTION_ANY : SOLUTION_NONE;
+static int is_zero(double value, double eps)
+{
+    return fabs(value) < eps;
+}
+
+static status_t solve_quadratic(double a, double b, double c, double eps,
+                                solution_t *solution)
+{
+    if (solution == NULL || eps <= 0.0) {
+        return STATUS_INVALID_EPS;
+    }
+    if (is_zero(a, eps)) {
+        if (is_zero(b, eps)) {
+            solution->kind = is_zero(c, eps) ? SOLUTION_ANY : SOLUTION_NONE;
         } else {
-            solution.kind = SOLUTION_ONE;
-            solution.roots[0] = -c / b;
+            solution->kind = SOLUTION_ONE;
+            solution->first = -c / b + 0.0;
         }
-        return solution;
+        return STATUS_OK;
     }
-    discriminant = b * b - 4 * a * c;
-    if (fabs(discriminant) < eps) {
-        solution.kind = SOLUTION_ONE;
-        solution.roots[0] = -b / (2 * a);
-    } else if (discriminant > 0) {
-        solution.kind = SOLUTION_TWO;
-        solution.roots[0] = (-b - sqrt(discriminant)) / (2 * a);
-        solution.roots[1] = (-b + sqrt(discriminant)) / (2 * a);
+    double discriminant = b * b - 4.0 * a * c;
+    if (!isfinite(discriminant)) {
+        return STATUS_OVERFLOW;
     }
-    return solution;
+    if (is_zero(discriminant, eps)) {
+        solution->kind = SOLUTION_ONE;
+        solution->first = -b / (2.0 * a) + 0.0;
+    } else if (discriminant > 0.0) {
+        double root = sqrt(discriminant);
+        solution->kind = SOLUTION_TWO_REAL;
+        solution->first = (-b - root) / (2.0 * a);
+        solution->second = (-b + root) / (2.0 * a);
+    } else {
+        solution->kind = SOLUTION_COMPLEX_PAIR;
+        solution->first = -b / (2.0 * a) + 0.0;
+        solution->second = sqrt(-discriminant) / (2.0 * fabs(a));
+    }
+    return STATUS_OK;
 }
 
-static int same_triple(const double *first, const double *second, const double eps)
+static int same_triple(const double *left, const double *right, double eps)
 {
-    for (int i = 0; i < 3; i++)
-        if (fabs(first[i] - second[i]) >= eps)
+    for (int index = 0; index < COEFFICIENTS_COUNT; index++) {
+        if (fabs(left[index] - right[index]) >= eps) {
             return 0;
+        }
+    }
     return 1;
 }
 
-static size_t unique_permutations(const double *coefficients, const double eps, double result[PERMUTATIONS_COUNT][3])
+static status_t unique_permutations(const double *coefficients, double eps,
+                                    double result[PERMUTATIONS_COUNT][COEFFICIENTS_COUNT],
+                                    size_t *count)
 {
-    static const int orders[PERMUTATIONS_COUNT][3] = {
-        {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}
-    };
-    size_t count = 0;
-
-    for (int p = 0; p < PERMUTATIONS_COUNT; p++) {
-        double candidate[3];
+    if (coefficients == NULL || result == NULL || count == NULL || eps <= 0.0) {
+        return STATUS_INVALID_VALUE;
+    }
+    const int orders[PERMUTATIONS_COUNT][COEFFICIENTS_COUNT] = {
+        {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    *count = 0;
+    for (int order = 0; order < PERMUTATIONS_COUNT; order++) {
+        double candidate[COEFFICIENTS_COUNT];
+        for (int index = 0; index < COEFFICIENTS_COUNT; index++) {
+            candidate[index] = coefficients[orders[order][index]];
+        }
         int duplicate = 0;
-
-        for (int i = 0; i < 3; i++)
-            candidate[i] = coefficients[orders[p][i]];
-        for (size_t j = 0; j < count; j++)
-            if (same_triple(candidate, result[j], eps))
+        for (size_t known = 0; known < *count; known++) {
+            if (same_triple(candidate, result[known], eps)) {
                 duplicate = 1;
+                break;
+            }
+        }
         if (!duplicate) {
-            memcpy(result[count], candidate, sizeof(candidate));
-            count++;
+            for (int index = 0; index < COEFFICIENTS_COUNT; index++) {
+                result[*count][index] = candidate[index];
+            }
+            (*count)++;
         }
     }
-    return count;
+    return STATUS_OK;
 }
 
-static int is_divisible(const long long first, const long long second)
+static status_t is_multiple(int64_t first, int64_t second, int *result)
 {
-    if (second == -1)
-        return 1;
-    return first % second == 0;
+    if (result == NULL) {
+        return STATUS_INVALID_VALUE;
+    }
+    if (first == 0 || second == 0) {
+        return STATUS_INVALID_VALUE;
+    }
+    if (second == -1) {
+        *result = 1;
+        return STATUS_OK;
+    }
+    *result = (first % second == 0);
+    return STATUS_OK;
 }
 
-static int is_right_triangle(const double *sides, const double eps)
+static status_t is_right_triangle(double a, double b, double c, double eps,
+                                  int *result)
 {
-    double largest = fmax(sides[0], fmax(sides[1], sides[2]));
-    double sum_of_squares = sides[0] * sides[0] + sides[1] * sides[1] + sides[2] * sides[2];
-
-    return fabs(2 * largest * largest - sum_of_squares) < eps;
+    if (result == NULL || eps <= 0.0) {
+        return STATUS_INVALID_EPS;
+    }
+    if (a <= 0.0 || b <= 0.0 || c <= 0.0) {
+        return STATUS_INVALID_VALUE;
+    }
+    double aa = a * a;
+    double bb = b * b;
+    double cc = c * c;
+    if (!isfinite(aa) || !isfinite(bb) || !isfinite(cc)) {
+        return STATUS_OVERFLOW;
+    }
+    *result = is_zero(aa + bb - cc, eps) || is_zero(aa + cc - bb, eps) ||
+              is_zero(bb + cc - aa, eps);
+    return STATUS_OK;
 }
 
 static void print_solution(const solution_t *solution)
 {
     switch (solution->kind) {
     case SOLUTION_NONE:
-        printf("no real roots\n");
+        printf("no solutions\n");
+        break;
+    case SOLUTION_ANY:
+        printf("any real x is a solution\n");
         break;
     case SOLUTION_ONE:
-        printf("x = %g\n", solution->roots[0]);
+        printf("x = %g\n", solution->first);
         break;
-    case SOLUTION_TWO:
-        printf("x1 = %g, x2 = %g\n", solution->roots[0], solution->roots[1]);
+    case SOLUTION_TWO_REAL:
+        printf("x1 = %g, x2 = %g\n", solution->first, solution->second);
         break;
-    default:
-        printf("any real number\n");
+    case SOLUTION_COMPLEX_PAIR:
+        printf("x1 = %g + %gi, x2 = %g - %gi\n", solution->first,
+               solution->second, solution->first, solution->second);
         break;
     }
 }
 
-static status_t run_quadratic(const int argc, char *argv[])
+static status_t run_quadratic(char *const *values)
 {
-    double eps;
-    double coefficients[3];
-    double permutations[PERMUTATIONS_COUNT][3];
-    size_t count;
-    status_t status;
-
-    if (argc != 6)
-        return ERR_ARGS_COUNT;
-    status = parse_eps(argv[2], &eps);
-    for (int i = 0; status == OK && i < 3; i++)
-        status = parse_double(argv[3 + i], &coefficients[i]);
-    if (status != OK)
+    double eps = 0.0;
+    double coefficients[COEFFICIENTS_COUNT];
+    status_t status = parse_eps(values[0], &eps);
+    for (int index = 0; status == STATUS_OK && index < COEFFICIENTS_COUNT;
+         index++) {
+        status = parse_double(values[index + 1], &coefficients[index]);
+    }
+    if (status != STATUS_OK) {
         return status;
-    count = unique_permutations(coefficients, eps, permutations);
-    for (size_t i = 0; i < count; i++) {
-        solution_t solution = solve_quadratic(permutations[i][0], permutations[i][1], permutations[i][2], eps);
-
-        printf("a=%g b=%g c=%g: ", permutations[i][0], permutations[i][1], permutations[i][2]);
+    }
+    double permutations[PERMUTATIONS_COUNT][COEFFICIENTS_COUNT];
+    size_t count = 0;
+    status = unique_permutations(coefficients, eps, permutations, &count);
+    if (status != STATUS_OK) {
+        return status;
+    }
+    for (size_t index = 0; index < count; index++) {
+        solution_t solution = {SOLUTION_NONE, 0.0, 0.0};
+        status = solve_quadratic(permutations[index][0], permutations[index][1],
+                                 permutations[index][2], eps, &solution);
+        if (status != STATUS_OK) {
+            return status;
+        }
+        printf("a=%g b=%g c=%g: ", permutations[index][0],
+               permutations[index][1], permutations[index][2]);
         print_solution(&solution);
     }
-    return OK;
+    return STATUS_OK;
 }
 
-static status_t run_multiple(const int argc, char *argv[])
+static status_t run_multiple(char *const *values)
 {
-    long long first;
-    long long second;
-    status_t status;
-
-    if (argc != 4)
-        return ERR_ARGS_COUNT;
-    status = parse_integer(argv[2], &first);
-    if (status == OK)
-        status = parse_integer(argv[3], &second);
-    if (status != OK)
+    int64_t first = 0;
+    int64_t second = 0;
+    status_t status = parse_int64(values[0], &first);
+    if (status == STATUS_OK) {
+        status = parse_int64(values[1], &second);
+    }
+    int result = 0;
+    if (status == STATUS_OK) {
+        status = is_multiple(first, second, &result);
+    }
+    if (status != STATUS_OK) {
         return status;
-    if (first == 0 || second == 0)
-        return ERR_ZERO;
-    if (is_divisible(first, second))
-        printf("%lld is divisible by %lld\n", first, second);
-    else
-        printf("%lld is not divisible by %lld\n", first, second);
-    return OK;
+    }
+    printf("%lld %s a multiple of %lld\n", (long long)first,
+           result ? "is" : "is not", (long long)second);
+    return STATUS_OK;
 }
 
-static status_t run_triangle(const int argc, char *argv[])
+static status_t run_triangle(char *const *values)
 {
-    double eps;
-    double sides[3];
-    status_t status;
-
-    if (argc != 6)
-        return ERR_ARGS_COUNT;
-    status = parse_eps(argv[2], &eps);
-    for (int i = 0; status == OK && i < 3; i++)
-        status = parse_double(argv[3 + i], &sides[i]);
-    if (status != OK)
+    double eps = 0.0;
+    double sides[COEFFICIENTS_COUNT];
+    status_t status = parse_eps(values[0], &eps);
+    for (int index = 0; status == STATUS_OK && index < COEFFICIENTS_COUNT;
+         index++) {
+        status = parse_double(values[index + 1], &sides[index]);
+    }
+    int result = 0;
+    if (status == STATUS_OK) {
+        status = is_right_triangle(sides[0], sides[1], sides[2], eps, &result);
+    }
+    if (status != STATUS_OK) {
         return status;
-    for (int i = 0; i < 3; i++)
-        if (sides[i] <= eps)
-            return ERR_SIDE;
-    if (is_right_triangle(sides, eps))
-        printf("these can be sides of a right triangle\n");
-    else
-        printf("these cannot be sides of a right triangle\n");
-    return OK;
+    }
+    printf("sides %g %g %g %s form a right triangle\n", sides[0], sides[1],
+           sides[2], result ? "can" : "cannot");
+    return STATUS_OK;
 }
 
-static const char *status_message(const status_t status)
+static status_t run_command(char flag, int argc, char *const *values)
 {
-    switch (status) {
-    case ERR_ARGS_COUNT: return "Wrong number of arguments for this flag";
-    case ERR_FLAG: return "Unknown flag";
-    case ERR_NUMBER: return "Invalid number";
-    case ERR_EPS: return "eps must be a positive number";
-    case ERR_ZERO: return "Numbers must be non-zero";
-    case ERR_SIDE: return "Sides must be positive";
-    default: return "";
+    switch (flag) {
+    case 'q':
+        return argc == 6 ? run_quadratic(values) : STATUS_INVALID_ARGS_COUNT;
+    case 'm':
+        return argc == 4 ? run_multiple(values) : STATUS_INVALID_ARGS_COUNT;
+    case 't':
+        return argc == 6 ? run_triangle(values) : STATUS_INVALID_ARGS_COUNT;
+    default:
+        return STATUS_INVALID_FLAG;
     }
 }
 
 int main(int argc, char *argv[])
 {
-    char flag;
-    status_t status;
-
     if (argc < 2) {
-        fprintf(stderr, "Usage: program <flag> <args>\n");
+        fprintf(stderr,
+                "Usage: %s -q eps a b c | -m n1 n2 | -t eps s1 s2 s3\n",
+                argv[0]);
         return 1;
     }
-    status = parse_flag(argv[1], &flag);
-    if (status == OK) {
-        switch (flag) {
-        case 'q': status = run_quadratic(argc, argv); break;
-        case 'm': status = run_multiple(argc, argv); break;
-        case 't': status = run_triangle(argc, argv); break;
-        default: status = ERR_FLAG; break;
-        }
+    char flag = '\0';
+    status_t status = parse_flag(argv[1], &flag);
+    if (status == STATUS_OK) {
+        status = run_command(flag, argc, argv + 2);
     }
-    if (status != OK) {
-        fprintf(stderr, "%s\n", status_message(status));
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Error: %s\n", status_message(status));
         return 1;
     }
     return 0;

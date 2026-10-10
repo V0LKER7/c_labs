@@ -1,270 +1,336 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
-#define INITIAL_LINE_CAPACITY 64
-#define NUMBER_BUFFER_SIZE 32
+#define INITIAL_LINE_CAPACITY 128
 #define OUTPUT_PREFIX "out_"
 
 typedef enum {
-    OK = 0,
-    ERR_ARGS_COUNT,
-    ERR_FLAG,
-    ERR_INPUT_OPEN,
-    ERR_OUTPUT_OPEN,
-    ERR_SAME_FILE,
-    ERR_MEMORY,
-    ERR_WRITE,
-    END_OF_FILE
+    STATUS_OK,
+    STATUS_INVALID_ARGS_COUNT,
+    STATUS_INVALID_FLAG,
+    STATUS_SAME_FILE,
+    STATUS_INPUT_OPEN_ERROR,
+    STATUS_OUTPUT_OPEN_ERROR,
+    STATUS_IO_ERROR,
+    STATUS_MEMORY_ERROR,
+    STATUS_END_OF_FILE
 } status_t;
 
-static int is_latin_letter(const int ch)
-{
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
-}
+typedef struct {
+    char action;
+    int custom_output;
+} options_t;
 
-static int is_digit_char(const int ch)
-{
-    return ch >= '0' && ch <= '9';
-}
-
-static status_t parse_flag(const char *arg, char *action, int *custom_output)
-{
+typedef struct {
+    char *data;
     size_t length;
+    size_t capacity;
+    int has_newline;
+} line_t;
 
-    if (arg == NULL || (arg[0] != '-' && arg[0] != '/'))
-        return ERR_FLAG;
-    length = strlen(arg);
-    if (length == 3 && arg[1] == 'n') {
-        *custom_output = 1;
-        *action = arg[2];
-    } else if (length == 2) {
-        *custom_output = 0;
-        *action = arg[1];
-    } else {
-        return ERR_FLAG;
-    }
-    if (strchr("disa", *action) == NULL)
-        return ERR_FLAG;
-    return OK;
-}
-
-static status_t build_default_output_path(const char *input_path, char **output_path)
-{
-    const char *name = input_path;
-    size_t directory_length;
-    char *result;
-
-    for (const char *p = input_path; *p != '\0'; p++)
-        if (*p == '/' || *p == '\\')
-            name = p + 1;
-    directory_length = (size_t)(name - input_path);
-    result = malloc(strlen(input_path) + strlen(OUTPUT_PREFIX) + 1);
-    if (result == NULL)
-        return ERR_MEMORY;
-    memcpy(result, input_path, directory_length);
-    strcpy(result + directory_length, OUTPUT_PREFIX);
-    strcat(result, name);
-    *output_path = result;
-    return OK;
-}
-
-static status_t read_line(FILE *file, char **line, size_t *length)
-{
-    size_t capacity = INITIAL_LINE_CAPACITY;
-    size_t size = 0;
-    char *buffer = malloc(capacity);
-    int ch;
-
-    if (buffer == NULL)
-        return ERR_MEMORY;
-    while ((ch = fgetc(file)) != EOF && ch != '\n') {
-        if (size + 1 >= capacity) {
-            char *bigger = realloc(buffer, capacity * 2);
-
-            if (bigger == NULL) {
-                free(buffer);
-                return ERR_MEMORY;
-            }
-            buffer = bigger;
-            capacity *= 2;
-        }
-        buffer[size++] = (char)ch;
-    }
-    if (ch == EOF && size == 0) {
-        free(buffer);
-        return END_OF_FILE;
-    }
-    buffer[size] = '\0';
-    *line = buffer;
-    *length = size;
-    return OK;
-}
-
-static status_t remove_digits(const char *line, const size_t length, char **result)
-{
-    size_t size = 0;
-    char *buffer = malloc(length + 1);
-
-    if (buffer == NULL)
-        return ERR_MEMORY;
-    for (size_t i = 0; i < length; i++)
-        if (!is_digit_char(line[i]))
-            buffer[size++] = line[i];
-    buffer[size] = '\0';
-    *result = buffer;
-    return OK;
-}
-
-static size_t count_letters(const char *line, const size_t length)
-{
-    size_t count = 0;
-
-    for (size_t i = 0; i < length; i++)
-        if (is_latin_letter(line[i]))
-            count++;
-    return count;
-}
-
-static size_t count_others(const char *line, const size_t length)
-{
-    size_t count = 0;
-
-    for (size_t i = 0; i < length; i++)
-        if (!is_latin_letter(line[i]) && !is_digit_char(line[i]) && line[i] != ' ')
-            count++;
-    return count;
-}
-
-static status_t replace_non_digits(const char *line, const size_t length, char **result)
-{
-    size_t size = 0;
-    char *buffer = malloc(length * 2 + 1);
-
-    if (buffer == NULL)
-        return ERR_MEMORY;
-    for (size_t i = 0; i < length; i++) {
-        if (is_digit_char(line[i])) {
-            buffer[size++] = line[i];
-        } else {
-            sprintf(buffer + size, "%02X", (unsigned)(unsigned char)line[i]);
-            size += 2;
-        }
-    }
-    buffer[size] = '\0';
-    *result = buffer;
-    return OK;
-}
-
-static status_t number_to_text(const size_t value, char **result)
-{
-    char *buffer = malloc(NUMBER_BUFFER_SIZE);
-
-    if (buffer == NULL)
-        return ERR_MEMORY;
-    snprintf(buffer, NUMBER_BUFFER_SIZE, "%zu", value);
-    *result = buffer;
-    return OK;
-}
-
-static status_t transform_line(const char action, const char *line, const size_t length, char **result)
-{
-    switch (action) {
-    case 'd': return remove_digits(line, length, result);
-    case 'i': return number_to_text(count_letters(line, length), result);
-    case 's': return number_to_text(count_others(line, length), result);
-    default: return replace_non_digits(line, length, result);
-    }
-}
-
-static status_t process_file(const char action, FILE *input, FILE *output)
-{
-    status_t status;
-    char *line;
-    size_t length;
-
-    while ((status = read_line(input, &line, &length)) == OK) {
-        char *result;
-
-        status = transform_line(action, line, length, &result);
-        free(line);
-        if (status != OK)
-            return status;
-        if (fputs(result, output) == EOF || fputc('\n', output) == EOF)
-            status = ERR_WRITE;
-        free(result);
-        if (status != OK)
-            return status;
-    }
-    return status == END_OF_FILE ? OK : status;
-}
-
-static status_t run(const char action, const char *input_path, const char *output_path)
-{
-    FILE *input;
-    FILE *output;
-    status_t status;
-
-    if (strcmp(input_path, output_path) == 0)
-        return ERR_SAME_FILE;
-    input = fopen(input_path, "r");
-    if (input == NULL)
-        return ERR_INPUT_OPEN;
-    output = fopen(output_path, "w");
-    if (output == NULL) {
-        fclose(input);
-        return ERR_OUTPUT_OPEN;
-    }
-    status = process_file(action, input, output);
-    fclose(input);
-    if (fclose(output) != 0 && status == OK)
-        status = ERR_WRITE;
-    return status;
-}
-
-static const char *status_message(const status_t status)
+static const char *status_message(status_t status)
 {
     switch (status) {
-    case ERR_ARGS_COUNT: return "Usage: program <flag> <input> [output when flag has n]";
-    case ERR_FLAG: return "Unknown flag";
-    case ERR_INPUT_OPEN: return "Cannot open input file";
-    case ERR_OUTPUT_OPEN: return "Cannot open output file";
-    case ERR_SAME_FILE: return "Input and output files must differ";
-    case ERR_MEMORY: return "Memory allocation failed";
-    case ERR_WRITE: return "Write error";
-    default: return "";
+    case STATUS_OK:
+        return "ok";
+    case STATUS_INVALID_ARGS_COUNT:
+        return "wrong number of arguments";
+    case STATUS_INVALID_FLAG:
+        return "unknown flag";
+    case STATUS_SAME_FILE:
+        return "input and output paths must differ";
+    case STATUS_INPUT_OPEN_ERROR:
+        return "cannot open input file";
+    case STATUS_OUTPUT_OPEN_ERROR:
+        return "cannot open output file";
+    case STATUS_IO_ERROR:
+        return "input/output error";
+    case STATUS_MEMORY_ERROR:
+        return "memory allocation failed";
+    case STATUS_END_OF_FILE:
+        return "end of file";
     }
+    return "unknown error";
+}
+
+static status_t parse_flag(const char *argument, options_t *options)
+{
+    if (argument == NULL || options == NULL) {
+        return STATUS_INVALID_FLAG;
+    }
+    if (argument[0] != '-' && argument[0] != '/') {
+        return STATUS_INVALID_FLAG;
+    }
+    size_t position = 1;
+    options->custom_output = 0;
+    if (argument[position] == 'n') {
+        options->custom_output = 1;
+        position++;
+    }
+    char action = argument[position];
+    if ((action != 'd' && action != 'i' && action != 's' && action != 'a') ||
+        argument[position + 1] != '\0') {
+        return STATUS_INVALID_FLAG;
+    }
+    options->action = action;
+    return STATUS_OK;
+}
+
+static status_t build_output_path(const char *input_path, char **output_path)
+{
+    if (input_path == NULL || output_path == NULL) {
+        return STATUS_INVALID_ARGS_COUNT;
+    }
+    size_t name_start = 0;
+    for (size_t index = 0; input_path[index] != '\0'; index++) {
+        if (input_path[index] == '/' || input_path[index] == '\\') {
+            name_start = index + 1;
+        }
+    }
+    size_t prefix_length = strlen(OUTPUT_PREFIX);
+    size_t total = strlen(input_path) + prefix_length + 1;
+    char *path = malloc(total);
+    if (path == NULL) {
+        return STATUS_MEMORY_ERROR;
+    }
+    memcpy(path, input_path, name_start);
+    memcpy(path + name_start, OUTPUT_PREFIX, prefix_length);
+    strcpy(path + name_start + prefix_length, input_path + name_start);
+    *output_path = path;
+    return STATUS_OK;
+}
+
+static int is_digit_symbol(unsigned char symbol)
+{
+    return symbol >= '0' && symbol <= '9';
+}
+
+static int is_latin_letter(unsigned char symbol)
+{
+    return (symbol >= 'a' && symbol <= 'z') || (symbol >= 'A' && symbol <= 'Z');
+}
+
+static void remove_digits(const char *line, size_t length, char *result,
+                          size_t *result_length)
+{
+    size_t count = 0;
+    for (size_t index = 0; index < length; index++) {
+        if (!is_digit_symbol((unsigned char)line[index])) {
+            result[count++] = line[index];
+        }
+    }
+    result[count] = '\0';
+    *result_length = count;
+}
+
+static size_t count_latin_letters(const char *line, size_t length)
+{
+    size_t count = 0;
+    for (size_t index = 0; index < length; index++) {
+        if (is_latin_letter((unsigned char)line[index])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static size_t count_other_symbols(const char *line, size_t length)
+{
+    size_t count = 0;
+    for (size_t index = 0; index < length; index++) {
+        unsigned char symbol = (unsigned char)line[index];
+        if (!is_latin_letter(symbol) && !is_digit_symbol(symbol) &&
+            symbol != ' ') {
+            count++;
+        }
+    }
+    return count;
+}
+
+static size_t append_hex_code(char *destination, unsigned char symbol)
+{
+    const char alphabet[] = "0123456789ABCDEF";
+    if (symbol < 16) {
+        destination[0] = alphabet[symbol];
+        return 1;
+    }
+    destination[0] = alphabet[symbol / 16];
+    destination[1] = alphabet[symbol % 16];
+    return 2;
+}
+
+static void replace_non_digits_with_hex(const char *line, size_t length,
+                                        char *result, size_t *result_length)
+{
+    size_t count = 0;
+    for (size_t index = 0; index < length; index++) {
+        unsigned char symbol = (unsigned char)line[index];
+        if (is_digit_symbol(symbol)) {
+            result[count++] = (char)symbol;
+        } else {
+            count += append_hex_code(result + count, symbol);
+        }
+    }
+    result[count] = '\0';
+    *result_length = count;
+}
+
+static status_t grow_line(line_t *line)
+{
+    size_t capacity = line->capacity == 0 ? INITIAL_LINE_CAPACITY : line->capacity * 2;
+    char *data = realloc(line->data, capacity);
+    if (data == NULL) {
+        return STATUS_MEMORY_ERROR;
+    }
+    line->data = data;
+    line->capacity = capacity;
+    return STATUS_OK;
+}
+
+static status_t read_line(FILE *file, line_t *line)
+{
+    line->length = 0;
+    line->has_newline = 0;
+    int symbol = fgetc(file);
+    if (symbol == EOF) {
+        return ferror(file) ? STATUS_IO_ERROR : STATUS_END_OF_FILE;
+    }
+    while (symbol != EOF && symbol != '\n') {
+        if (line->length + 1 >= line->capacity) {
+            status_t status = grow_line(line);
+            if (status != STATUS_OK) {
+                return status;
+            }
+        }
+        line->data[line->length++] = (char)symbol;
+        symbol = fgetc(file);
+    }
+    if (line->capacity == 0) {
+        status_t status = grow_line(line);
+        if (status != STATUS_OK) {
+            return status;
+        }
+    }
+    line->data[line->length] = '\0';
+    line->has_newline = (symbol == '\n');
+    return ferror(file) ? STATUS_IO_ERROR : STATUS_OK;
+}
+
+static status_t write_text(FILE *file, const char *text, size_t length,
+                           int newline)
+{
+    if (length > 0 && fwrite(text, 1, length, file) != length) {
+        return STATUS_IO_ERROR;
+    }
+    if (newline && fputc('\n', file) == EOF) {
+        return STATUS_IO_ERROR;
+    }
+    return STATUS_OK;
+}
+
+static status_t write_count(FILE *file, size_t count)
+{
+    return fprintf(file, "%zu\n", count) < 0 ? STATUS_IO_ERROR : STATUS_OK;
+}
+
+static status_t process_line(char action, const line_t *line, char **buffer,
+                             size_t *buffer_capacity, FILE *output)
+{
+    if (action == 'i') {
+        return write_count(output, count_latin_letters(line->data, line->length));
+    }
+    if (action == 's') {
+        return write_count(output, count_other_symbols(line->data, line->length));
+    }
+    size_t needed = line->length * 2 + 1;
+    if (needed > *buffer_capacity) {
+        char *grown = realloc(*buffer, needed);
+        if (grown == NULL) {
+            return STATUS_MEMORY_ERROR;
+        }
+        *buffer = grown;
+        *buffer_capacity = needed;
+    }
+    size_t result_length = 0;
+    if (action == 'd') {
+        remove_digits(line->data, line->length, *buffer, &result_length);
+    } else {
+        replace_non_digits_with_hex(line->data, line->length, *buffer,
+                                    &result_length);
+    }
+    return write_text(output, *buffer, result_length, line->has_newline);
+}
+
+static status_t process_file(char action, FILE *input, FILE *output)
+{
+    line_t line = {NULL, 0, 0, 0};
+    char *buffer = NULL;
+    size_t buffer_capacity = 0;
+    status_t status = STATUS_OK;
+    while (status == STATUS_OK) {
+        status = read_line(input, &line);
+        if (status == STATUS_OK) {
+            status = process_line(action, &line, &buffer, &buffer_capacity, output);
+        }
+    }
+    free(line.data);
+    free(buffer);
+    return status == STATUS_END_OF_FILE ? STATUS_OK : status;
+}
+
+static status_t run(const options_t *options, const char *input_path,
+                    const char *output_path)
+{
+    if (strcmp(input_path, output_path) == 0) {
+        return STATUS_SAME_FILE;
+    }
+    FILE *input = fopen(input_path, "rb");
+    if (input == NULL) {
+        return STATUS_INPUT_OPEN_ERROR;
+    }
+    FILE *output = fopen(output_path, "wb");
+    if (output == NULL) {
+        fclose(input);
+        return STATUS_OUTPUT_OPEN_ERROR;
+    }
+    status_t status = process_file(options->action, input, output);
+    if (fclose(output) != 0 && status == STATUS_OK) {
+        status = STATUS_IO_ERROR;
+    }
+    fclose(input);
+    return status;
 }
 
 int main(int argc, char *argv[])
 {
-    char action;
-    int custom_output;
-    char *default_path = NULL;
-    const char *output_path;
-    status_t status;
-
-    if (argc < 3) {
-        fprintf(stderr, "%s\n", status_message(ERR_ARGS_COUNT));
+    if (argc < 3 || argc > 4) {
+        fprintf(stderr, "Usage: %s <-d|-i|-s|-a> <input> or %s <-nd|-ni|-ns|-na> <input> <output>\n",
+                argv[0], argv[0]);
         return 1;
     }
-    status = parse_flag(argv[1], &action, &custom_output);
-    if (status == OK && argc != (custom_output ? 4 : 3))
-        status = ERR_ARGS_COUNT;
-    if (status == OK) {
-        if (custom_output) {
+    options_t options = {'\0', 0};
+    status_t status = parse_flag(argv[1], &options);
+    if (status == STATUS_OK &&
+        ((options.custom_output && argc != 4) || (!options.custom_output && argc != 3))) {
+        status = STATUS_INVALID_ARGS_COUNT;
+    }
+    char *generated_path = NULL;
+    const char *output_path = NULL;
+    if (status == STATUS_OK) {
+        if (options.custom_output) {
             output_path = argv[3];
         } else {
-            status = build_default_output_path(argv[2], &default_path);
-            output_path = default_path;
+            status = build_output_path(argv[2], &generated_path);
+            output_path = generated_path;
         }
     }
-    if (status == OK)
-        status = run(action, argv[2], output_path);
-    free(default_path);
-    if (status != OK) {
-        fprintf(stderr, "%s\n", status_message(status));
+    if (status == STATUS_OK) {
+        status = run(&options, argv[2], output_path);
+    }
+    free(generated_path);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Error: %s\n", status_message(status));
         return 1;
     }
     return 0;
