@@ -5,21 +5,25 @@
 
 typedef enum {
     STATUS_OK,
-    STATUS_NULL_POINTER,
+    STATUS_NULL_ARGUMENT,
     STATUS_NO_MEMORY,
-    STATUS_INVALID_ARGUMENT
-} Status;
+    STATUS_INVALID_EPSILON,
+    STATUS_INVALID_DEGREE
+} status_t;
 
-Status shift_polynomial(double epsilon, double shift, double **result, int degree, ...)
+status_t shift_polynomial(double eps, double a, double **result, int degree, ...)
 {
     if (result == NULL) {
-        return STATUS_NULL_POINTER;
+        return STATUS_NULL_ARGUMENT;
     }
-    if (epsilon < 0.0 || degree < 0) {
-        return STATUS_INVALID_ARGUMENT;
+    if (eps < 0.0) {
+        return STATUS_INVALID_EPSILON;
+    }
+    if (degree < 0) {
+        return STATUS_INVALID_DEGREE;
     }
     size_t size = (size_t)degree + 1;
-    double *coefficients = malloc(size * sizeof *coefficients);
+    double *coefficients = malloc(size * sizeof(double));
     if (coefficients == NULL) {
         return STATUS_NO_MEMORY;
     }
@@ -29,54 +33,84 @@ Status shift_polynomial(double epsilon, double shift, double **result, int degre
         coefficients[i] = va_arg(args, double);
     }
     va_end(args);
-
-    for (size_t i = 0; i < size - 1; i++) {
-        for (size_t j = size - 1; j > i; j--) {
-            coefficients[j - 1] += shift * coefficients[j];
-        }
+    double *shifted = malloc(size * sizeof(double));
+    if (shifted == NULL) {
+        free(coefficients);
+        return STATUS_NO_MEMORY;
     }
     for (size_t i = 0; i < size; i++) {
-        if (fabs(coefficients[i]) < epsilon) {
-            coefficients[i] = 0.0;
+        for (size_t j = size - 1; j > i; j--) {
+            coefficients[j - 1] += a * coefficients[j];
         }
+        shifted[i] = fabs(coefficients[i]) < eps ? 0.0 : coefficients[i];
     }
-    *result = coefficients;
+    free(coefficients);
+    *result = shifted;
     return STATUS_OK;
 }
 
-static void print_coefficients(const char *title, Status status, const double *coefficients, int degree)
+static const char *status_message(status_t status)
 {
-    printf("%s\n", title);
-    if (status != STATUS_OK) {
-        printf("  error %d\n", status);
-        return;
+    switch (status) {
+    case STATUS_NULL_ARGUMENT:
+        return "null argument";
+    case STATUS_NO_MEMORY:
+        return "out of memory";
+    case STATUS_INVALID_EPSILON:
+        return "epsilon must not be negative";
+    case STATUS_INVALID_DEGREE:
+        return "degree must not be negative";
+    default:
+        return "unknown error";
     }
+}
+
+static void print_coefficients(const char *title, const double *coefficients, int degree)
+{
+    printf("%s:", title);
     for (int i = 0; i <= degree; i++) {
-        printf("  g%d = %g\n", i, coefficients[i]);
+        printf(" g%d=%g", i, coefficients[i]);
     }
+    printf("\n");
 }
 
 int main(void)
 {
     double *result = NULL;
 
-    Status status = shift_polynomial(1e-9, 1.0, &result, 2, 1.0, 2.0, 3.0);
-    print_coefficients("f = 1 + 2x + 3x^2, a = 1", status, result, 2);
+    status_t status = shift_polynomial(1e-9, 1.0, &result, 2, 1.0, 2.0, 3.0);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Error: %s\n", status_message(status));
+        return 1;
+    }
+    print_coefficients("1 + 2x + 3x^2 at a=1", result, 2);
     free(result);
+    result = NULL;
 
-    status = shift_polynomial(1e-9, 2.0, &result, 3, 0.0, 0.0, 0.0, 1.0);
-    print_coefficients("f = x^3, a = 2", status, result, 3);
+    status = shift_polynomial(1e-9, 2.0, &result, 3, 1.0, -2.0, 0.0, 1.0);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Error: %s\n", status_message(status));
+        return 1;
+    }
+    print_coefficients("1 - 2x + x^3 at a=2", result, 3);
     free(result);
+    result = NULL;
 
-    status = shift_polynomial(1e-9, -1.5, &result, 4, 5.0, -3.0, 0.0, 2.0, 1.0);
-    print_coefficients("f = 5 - 3x + 2x^3 + x^4, a = -1.5", status, result, 4);
+    status = shift_polynomial(1e-9, 0.5, &result, 2, 0.0, 0.0, 1.0);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Error: %s\n", status_message(status));
+        return 1;
+    }
+    print_coefficients("x^2 at a=0.5", result, 2);
     free(result);
+    result = NULL;
 
-    status = shift_polynomial(1e-9, 3.0, &result, 0, 7.0);
-    print_coefficients("f = 7, a = 3", status, result, 0);
-    free(result);
-
-    status = shift_polynomial(1e-9, 3.0, &result, -1);
-    print_coefficients("degree -1", status, NULL, 0);
+    status = shift_polynomial(1e-9, 1.0, &result, 0, 5.0);
+    if (status == STATUS_OK) {
+        print_coefficients("constant 5 at a=1", result, 0);
+        free(result);
+    }
+    status = shift_polynomial(1e-9, 1.0, &result, -1);
+    printf("negative degree: %s\n", status_message(status));
     return 0;
 }

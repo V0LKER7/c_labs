@@ -5,114 +5,119 @@
 
 typedef enum {
     STATUS_OK,
-    STATUS_NULL_POINTER,
+    STATUS_NULL_ARGUMENT,
     STATUS_NO_MEMORY,
     STATUS_INVALID_BASE,
     STATUS_INVALID_NUMBER
-} Status;
+} status_t;
 
-static const char *const DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-static int digit_value(char symbol)
+static int digit_value(char c)
 {
-    if (symbol >= '0' && symbol <= '9') {
-        return symbol - '0';
+    if (c >= '0' && c <= '9') {
+        return c - '0';
     }
-    if (symbol >= 'a' && symbol <= 'z') {
-        return symbol - 'a' + 10;
+    if (c >= 'a' && c <= 'z') {
+        return c - 'a' + 10;
     }
-    if (symbol >= 'A' && symbol <= 'Z') {
-        return symbol - 'A' + 10;
+    if (c >= 'A' && c <= 'Z') {
+        return c - 'A' + 10;
     }
     return -1;
 }
 
-static Status validate_number(const char *text, int base)
+static char digit_char(int value)
 {
-    if (text == NULL) {
-        return STATUS_NULL_POINTER;
+    return (char)(value < 10 ? '0' + value : 'A' + value - 10);
+}
+
+static status_t validate_number(const char *number, int base)
+{
+    if (number == NULL) {
+        return STATUS_NULL_ARGUMENT;
     }
-    if (text[0] == '\0') {
+    if (*number == '\0') {
         return STATUS_INVALID_NUMBER;
     }
-    for (const char *symbol = text; *symbol != '\0'; symbol++) {
-        int value = digit_value(*symbol);
-        if (value < 0 || value >= base) {
+    for (; *number != '\0'; number++) {
+        int digit = digit_value(*number);
+        if (digit < 0 || digit >= base) {
             return STATUS_INVALID_NUMBER;
         }
     }
     return STATUS_OK;
 }
 
-Status add_in_columns(const char *left, const char *right, int base, char **result)
+status_t add_in_columns(const char *left, const char *right, int base, char **result)
 {
     if (result == NULL) {
-        return STATUS_NULL_POINTER;
+        return STATUS_NULL_ARGUMENT;
     }
     if (base < 2 || base > 36) {
         return STATUS_INVALID_BASE;
     }
-    Status status = validate_number(left, base);
-    if (status != STATUS_OK) {
-        return status;
+    status_t status = validate_number(left, base);
+    if (status == STATUS_OK) {
+        status = validate_number(right, base);
     }
-    status = validate_number(right, base);
     if (status != STATUS_OK) {
         return status;
     }
     size_t left_length = strlen(left);
     size_t right_length = strlen(right);
     size_t max_length = left_length > right_length ? left_length : right_length;
-    char *reversed = malloc(max_length + 2);
-    if (reversed == NULL) {
+    char *digits = malloc(max_length + 2);
+    if (digits == NULL) {
         return STATUS_NO_MEMORY;
     }
     int carry = 0;
+    size_t length = 0;
     for (size_t i = 0; i < max_length; i++) {
-        int a = i < left_length ? digit_value(left[left_length - 1 - i]) : 0;
-        int b = i < right_length ? digit_value(right[right_length - 1 - i]) : 0;
-        int sum = a + b + carry;
-        reversed[i] = DIGITS[sum % base];
+        int left_digit = i < left_length ? digit_value(left[left_length - 1 - i]) : 0;
+        int right_digit = i < right_length ? digit_value(right[right_length - 1 - i]) : 0;
+        int sum = left_digit + right_digit + carry;
+        digits[length++] = digit_char(sum % base);
         carry = sum / base;
     }
-    size_t length = max_length;
     if (carry > 0) {
-        reversed[length++] = DIGITS[carry];
+        digits[length++] = digit_char(carry);
     }
-    while (length > 1 && reversed[length - 1] == '0') {
+    while (length > 1 && digits[length - 1] == '0') {
         length--;
     }
-    char *output = malloc(length + 1);
-    if (output == NULL) {
-        free(reversed);
-        return STATUS_NO_MEMORY;
+    for (size_t i = 0; i < length / 2; i++) {
+        char tmp = digits[i];
+        digits[i] = digits[length - 1 - i];
+        digits[length - 1 - i] = tmp;
     }
-    for (size_t i = 0; i < length; i++) {
-        output[i] = reversed[length - 1 - i];
-    }
-    output[length] = '\0';
-    free(reversed);
-    *result = output;
+    digits[length] = '\0';
+    *result = digits;
     return STATUS_OK;
 }
 
-Status sum_in_base(int base, size_t count, char **result, ...)
+static char *copy_string(const char *text)
+{
+    char *copy = malloc(strlen(text) + 1);
+    if (copy != NULL) {
+        strcpy(copy, text);
+    }
+    return copy;
+}
+
+status_t sum_in_base(char **result, int base, size_t count, ...)
 {
     if (result == NULL) {
-        return STATUS_NULL_POINTER;
+        return STATUS_NULL_ARGUMENT;
     }
     if (base < 2 || base > 36) {
         return STATUS_INVALID_BASE;
     }
-    char *total = malloc(2);
+    char *total = copy_string("0");
     if (total == NULL) {
         return STATUS_NO_MEMORY;
     }
-    total[0] = '0';
-    total[1] = '\0';
-    Status status = STATUS_OK;
+    status_t status = STATUS_OK;
     va_list args;
-    va_start(args, result);
+    va_start(args, count);
     for (size_t i = 0; i < count && status == STATUS_OK; i++) {
         const char *number = va_arg(args, const char *);
         char *next = NULL;
@@ -131,42 +136,62 @@ Status sum_in_base(int base, size_t count, char **result, ...)
     return STATUS_OK;
 }
 
-static void print_sum(const char *title, Status status, const char *sum)
+static const char *status_message(status_t status)
+{
+    switch (status) {
+    case STATUS_NULL_ARGUMENT:
+        return "null argument";
+    case STATUS_NO_MEMORY:
+        return "out of memory";
+    case STATUS_INVALID_BASE:
+        return "base must be in range 2..36";
+    case STATUS_INVALID_NUMBER:
+        return "invalid digit in number";
+    default:
+        return "unknown error";
+    }
+}
+
+static void show(const char *title, status_t status, const char *value)
 {
     if (status == STATUS_OK) {
-        printf("%s = %s\n", title, sum);
+        printf("%s = %s\n", title, value);
     } else {
-        printf("%s: error %d\n", title, status);
+        printf("%s: error: %s\n", title, status_message(status));
     }
 }
 
 int main(void)
 {
-    char *sum = NULL;
-    Status status = sum_in_base(16, 3, &sum, "FF", "1", "abc");
-    print_sum("base 16: FF + 1 + abc", status, sum);
-    free(sum);
+    char *result = NULL;
+    status_t status = sum_in_base(&result, 16, 3, "FF", "1", "a0");
+    show("base 16: FF + 1 + a0", status, result);
+    free(result);
+    result = NULL;
 
-    status = sum_in_base(2, 2, &sum, "0011", "0001");
-    print_sum("base 2: 0011 + 0001", status, sum);
-    free(sum);
+    status = sum_in_base(&result, 2, 3, "1010", "0110", "1");
+    show("base 2: 1010 + 0110 + 1", status, result);
+    free(result);
+    result = NULL;
 
-    status = sum_in_base(10, 2, &sum, "99999999999999999999999999", "1");
-    print_sum("base 10: 99999999999999999999999999 + 1", status, sum);
-    free(sum);
+    status = sum_in_base(&result, 10, 2, "99999999999999999999999999999999", "1");
+    show("base 10: 99...9 (32 digits) + 1", status, result);
+    free(result);
+    result = NULL;
 
-    status = sum_in_base(36, 2, &sum, "Z", "1");
-    print_sum("base 36: Z + 1", status, sum);
-    free(sum);
+    status = sum_in_base(&result, 36, 2, "ZZZ", "1");
+    show("base 36: ZZZ + 1", status, result);
+    free(result);
+    result = NULL;
 
-    status = sum_in_base(10, 3, &sum, "000", "00", "0");
-    print_sum("base 10: 000 + 00 + 0", status, sum);
-    free(sum);
+    status = sum_in_base(&result, 10, 2, "000", "0000");
+    show("base 10: 000 + 0000", status, result);
+    free(result);
+    result = NULL;
 
-    status = sum_in_base(2, 2, &sum, "101", "102");
-    print_sum("base 2: 101 + 102", status, NULL);
-
-    status = sum_in_base(1, 1, &sum, "1");
-    print_sum("base 1", status, NULL);
+    status = sum_in_base(&result, 8, 2, "17", "8");
+    show("base 8: 17 + 8", status, result);
+    status = sum_in_base(&result, 40, 1, "1");
+    show("base 40", status, result);
     return 0;
 }

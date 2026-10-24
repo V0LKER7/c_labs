@@ -1,8 +1,5 @@
 #include <ctype.h>
-#include <float.h>
-#include <limits.h>
 #include <math.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,250 +10,289 @@
 
 typedef enum {
     STATUS_OK,
-    STATUS_NULL_POINTER,
+    STATUS_NULL_ARGUMENT,
     STATUS_NO_MEMORY,
-    STATUS_INVALID_FLAG,
-    STATUS_INVALID_DATA,
-    STATUS_FILE_ERROR
-} Status;
+    STATUS_OPEN_INPUT,
+    STATUS_OPEN_OUTPUT,
+    STATUS_BAD_FORMAT,
+    STATUS_LINE_TOO_LONG,
+    STATUS_BAD_FLAG,
+    STATUS_WRITE_ERROR,
+    STATUS_BAD_ARGUMENTS
+} status_t;
 
-typedef struct {
+typedef struct Employee {
     unsigned int id;
     char name[NAME_SIZE];
     char surname[NAME_SIZE];
     double salary;
 } Employee;
 
-static bool is_latin_word(const char *text)
+static int compare_double(double a, double b, double eps)
 {
-    if (text[0] == '\0') {
-        return false;
+    if (fabs(a - b) <= eps) {
+        return 0;
     }
-    for (const char *symbol = text; *symbol != '\0'; symbol++) {
-        bool is_lower = *symbol >= 'a' && *symbol <= 'z';
-        bool is_upper = *symbol >= 'A' && *symbol <= 'Z';
-        if (!is_lower && !is_upper) {
-            return false;
-        }
-    }
-    return true;
+    return a < b ? -1 : 1;
 }
 
-static Status parse_unsigned(const char *text, unsigned int *value)
+static int is_blank(const char *line)
 {
-    if (text[0] == '\0') {
-        return STATUS_INVALID_DATA;
-    }
-    unsigned long long number = 0;
-    for (const char *symbol = text; *symbol != '\0'; symbol++) {
-        if (!isdigit((unsigned char)*symbol)) {
-            return STATUS_INVALID_DATA;
-        }
-        number = number * 10 + (unsigned long long)(*symbol - '0');
-        if (number > UINT_MAX) {
-            return STATUS_INVALID_DATA;
+    for (; *line != '\0'; line++) {
+        if (!isspace((unsigned char)*line)) {
+            return 0;
         }
     }
-    *value = (unsigned int)number;
+    return 1;
+}
+
+static int is_latin_word(const char *text)
+{
+    if (*text == '\0') {
+        return 0;
+    }
+    for (; *text != '\0'; text++) {
+        int is_lower = *text >= 'a' && *text <= 'z';
+        int is_upper = *text >= 'A' && *text <= 'Z';
+        if (!is_lower && !is_upper) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static status_t parse_id(const char *text, unsigned int *id)
+{
+    const unsigned int max_value = ~0u;
+    unsigned int result = 0;
+    if (*text == '\0') {
+        return STATUS_BAD_FORMAT;
+    }
+    for (; *text != '\0'; text++) {
+        if (!isdigit((unsigned char)*text)) {
+            return STATUS_BAD_FORMAT;
+        }
+        unsigned int digit = (unsigned int)(*text - '0');
+        if (result > (max_value - digit) / 10) {
+            return STATUS_BAD_FORMAT;
+        }
+        result = result * 10 + digit;
+    }
+    *id = result;
     return STATUS_OK;
 }
 
-static Status parse_employee(const char *line, Employee *employee)
+static status_t parse_salary(const char *text, double eps, double *salary)
+{
+    char *end = NULL;
+    double value = strtod(text, &end);
+    if (end == text || *end != '\0' || !isfinite(value)) {
+        return STATUS_BAD_FORMAT;
+    }
+    if (compare_double(value, 0.0, eps) < 0) {
+        return STATUS_BAD_FORMAT;
+    }
+    *salary = value;
+    return STATUS_OK;
+}
+
+static status_t parse_employee(const char *line, double eps, Employee *employee)
 {
     char id_text[32];
+    char name[NAME_SIZE];
+    char surname[NAME_SIZE];
     char salary_text[64];
-    int consumed = 0;
-    int fields = sscanf(line, "%31s %63s %63s %63s %n", id_text, employee->name,
-                        employee->surname, salary_text, &consumed);
-    if (fields != 4 || line[consumed] != '\0') {
-        return STATUS_INVALID_DATA;
+    char extra[2];
+    if (sscanf(line, "%31s %63s %63s %63s %1s", id_text, name, surname, salary_text, extra) != 4) {
+        return STATUS_BAD_FORMAT;
     }
-    if (parse_unsigned(id_text, &employee->id) != STATUS_OK) {
-        return STATUS_INVALID_DATA;
+    if (!is_latin_word(name) || !is_latin_word(surname)) {
+        return STATUS_BAD_FORMAT;
     }
-    if (!is_latin_word(employee->name) || !is_latin_word(employee->surname)) {
-        return STATUS_INVALID_DATA;
+    status_t status = parse_id(id_text, &employee->id);
+    if (status != STATUS_OK) {
+        return status;
     }
-    char *end = NULL;
-    employee->salary = strtod(salary_text, &end);
-    if (*end != '\0' || employee->salary < 0.0 || employee->salary > DBL_MAX) {
-        return STATUS_INVALID_DATA;
+    status = parse_salary(salary_text, eps, &employee->salary);
+    if (status != STATUS_OK) {
+        return status;
     }
+    strcpy(employee->name, name);
+    strcpy(employee->surname, surname);
     return STATUS_OK;
 }
 
-static bool is_blank_line(const char *line)
+static status_t append_employee(Employee **array, size_t *count, size_t *capacity, const Employee *employee)
 {
-    return line[strspn(line, " \t\r\n")] == '\0';
+    if (*count == *capacity) {
+        size_t new_capacity = *capacity == 0 ? 8 : *capacity * 2;
+        Employee *tmp = realloc(*array, new_capacity * sizeof(Employee));
+        if (tmp == NULL) {
+            return STATUS_NO_MEMORY;
+        }
+        *array = tmp;
+        *capacity = new_capacity;
+    }
+    (*array)[*count] = *employee;
+    (*count)++;
+    return STATUS_OK;
 }
 
-Status read_employees(FILE *input, Employee **employees, size_t *count)
+status_t read_employees(const char *path, Employee **employees, size_t *count)
 {
-    if (input == NULL || employees == NULL || count == NULL) {
-        return STATUS_NULL_POINTER;
+    if (path == NULL || employees == NULL || count == NULL) {
+        return STATUS_NULL_ARGUMENT;
     }
-    Employee *items = NULL;
+    FILE *file = fopen(path, "r");
+    if (file == NULL) {
+        return STATUS_OPEN_INPUT;
+    }
+    Employee *array = NULL;
     size_t size = 0;
     size_t capacity = 0;
+    status_t status = STATUS_OK;
     char line[LINE_SIZE];
-    while (fgets(line, sizeof line, input) != NULL) {
-        size_t length = strlen(line);
-        if (length == sizeof line - 1 && line[length - 1] != '\n') {
-            free(items);
-            return STATUS_INVALID_DATA;
-        }
-        if (is_blank_line(line)) {
-            continue;
-        }
-        if (size == capacity) {
-            size_t new_capacity = capacity == 0 ? 8 : capacity * 2;
-            Employee *temp = realloc(items, new_capacity * sizeof *temp);
-            if (temp == NULL) {
-                free(items);
-                return STATUS_NO_MEMORY;
+    while (status == STATUS_OK && fgets(line, sizeof(line), file) != NULL) {
+        if (strchr(line, '\n') == NULL && !feof(file)) {
+            status = STATUS_LINE_TOO_LONG;
+        } else if (!is_blank(line)) {
+            Employee employee;
+            status = parse_employee(line, SALARY_EPSILON, &employee);
+            if (status == STATUS_OK) {
+                status = append_employee(&array, &size, &capacity, &employee);
             }
-            items = temp;
-            capacity = new_capacity;
         }
-        Status status = parse_employee(line, &items[size]);
-        if (status != STATUS_OK) {
-            free(items);
-            return status;
-        }
-        size++;
     }
-    *employees = items;
+    fclose(file);
+    if (status != STATUS_OK) {
+        free(array);
+        return status;
+    }
+    *employees = array;
     *count = size;
     return STATUS_OK;
 }
 
-static int compare_doubles(double left, double right, double epsilon)
+static int compare_employees_asc(const void *left, const void *right)
 {
-    if (fabs(left - right) <= epsilon) {
-        return 0;
-    }
-    return left < right ? -1 : 1;
-}
-
-static int compare_ascending(const void *left_ptr, const void *right_ptr)
-{
-    const Employee *left = left_ptr;
-    const Employee *right = right_ptr;
-    int result = compare_doubles(left->salary, right->salary, SALARY_EPSILON);
+    const Employee *a = left;
+    const Employee *b = right;
+    int result = compare_double(a->salary, b->salary, SALARY_EPSILON);
     if (result != 0) {
         return result;
     }
-    result = strcmp(left->surname, right->surname);
+    result = strcmp(a->surname, b->surname);
     if (result != 0) {
         return result;
     }
-    result = strcmp(left->name, right->name);
+    result = strcmp(a->name, b->name);
     if (result != 0) {
         return result;
     }
-    if (left->id == right->id) {
-        return 0;
-    }
-    return left->id < right->id ? -1 : 1;
+    return (a->id > b->id) - (a->id < b->id);
 }
 
-static int compare_descending(const void *left, const void *right)
+static int compare_employees_desc(const void *left, const void *right)
 {
-    return compare_ascending(right, left);
+    return compare_employees_asc(right, left);
 }
 
-Status write_employees(FILE *output, const Employee *employees, size_t count)
+status_t sort_employees(Employee *employees, size_t count, int ascending)
 {
-    if (output == NULL || (employees == NULL && count > 0)) {
-        return STATUS_NULL_POINTER;
+    if (employees == NULL && count > 0) {
+        return STATUS_NULL_ARGUMENT;
     }
-    for (size_t i = 0; i < count; i++) {
-        if (fprintf(output, "%u %s %s %.2f\n", employees[i].id, employees[i].name,
-                    employees[i].surname, employees[i].salary) < 0) {
-            return STATUS_FILE_ERROR;
-        }
+    if (count > 1) {
+        qsort(employees, count, sizeof(Employee), ascending ? compare_employees_asc : compare_employees_desc);
     }
     return STATUS_OK;
 }
 
-static Status parse_flag(const char *flag, bool *ascending)
+status_t write_employees(const char *path, const Employee *employees, size_t count)
+{
+    if (path == NULL || (employees == NULL && count > 0)) {
+        return STATUS_NULL_ARGUMENT;
+    }
+    FILE *file = fopen(path, "w");
+    if (file == NULL) {
+        return STATUS_OPEN_OUTPUT;
+    }
+    status_t status = STATUS_OK;
+    for (size_t i = 0; i < count && status == STATUS_OK; i++) {
+        if (fprintf(file, "%u %s %s %.2f\n", employees[i].id, employees[i].name,
+                    employees[i].surname, employees[i].salary) < 0) {
+            status = STATUS_WRITE_ERROR;
+        }
+    }
+    if (fclose(file) != 0 && status == STATUS_OK) {
+        status = STATUS_WRITE_ERROR;
+    }
+    return status;
+}
+
+static status_t parse_flag(const char *flag, int *ascending)
 {
     if (flag[0] == '\0' || flag[1] == '\0' || flag[2] != '\0') {
-        return STATUS_INVALID_FLAG;
+        return STATUS_BAD_FLAG;
     }
     if (flag[0] != '-' && flag[0] != '/') {
-        return STATUS_INVALID_FLAG;
+        return STATUS_BAD_FLAG;
     }
     if (flag[1] == 'a') {
-        *ascending = true;
+        *ascending = 1;
         return STATUS_OK;
     }
     if (flag[1] == 'd') {
-        *ascending = false;
+        *ascending = 0;
         return STATUS_OK;
     }
-    return STATUS_INVALID_FLAG;
+    return STATUS_BAD_FLAG;
 }
 
-static const char *status_message(Status status)
+static const char *status_message(status_t status)
 {
     switch (status) {
-        case STATUS_NULL_POINTER:
-            return "null pointer";
-        case STATUS_NO_MEMORY:
-            return "out of memory";
-        case STATUS_INVALID_FLAG:
-            return "invalid flag";
-        case STATUS_INVALID_DATA:
-            return "invalid data in input file";
-        case STATUS_FILE_ERROR:
-            return "file error";
-        default:
-            return "unknown error";
+    case STATUS_NULL_ARGUMENT:
+        return "null argument";
+    case STATUS_NO_MEMORY:
+        return "out of memory";
+    case STATUS_OPEN_INPUT:
+        return "cannot open input file";
+    case STATUS_OPEN_OUTPUT:
+        return "cannot open output file";
+    case STATUS_BAD_FORMAT:
+        return "invalid data in input file";
+    case STATUS_LINE_TOO_LONG:
+        return "line in input file is too long";
+    case STATUS_BAD_FLAG:
+        return "flag must be -a, -d, /a or /d";
+    case STATUS_WRITE_ERROR:
+        return "write error";
+    case STATUS_BAD_ARGUMENTS:
+        return "usage: <input> <flag> <output>";
+    default:
+        return "unknown error";
     }
 }
 
 int main(int argc, char *argv[])
 {
     if (argc != 4) {
-        fprintf(stderr, "Usage: %s <input> <-a|-d|/a|/d> <output>\n", argv[0]);
+        fprintf(stderr, "Error: %s\n", status_message(STATUS_BAD_ARGUMENTS));
         return 1;
     }
-    bool ascending = true;
-    Status status = parse_flag(argv[2], &ascending);
-    if (status != STATUS_OK) {
-        fprintf(stderr, "Error: %s\n", status_message(status));
-        return 1;
-    }
-    if (strcmp(argv[1], argv[3]) == 0) {
-        fprintf(stderr, "Error: input and output files must differ\n");
-        return 1;
-    }
-    FILE *input = fopen(argv[1], "r");
-    if (input == NULL) {
-        fprintf(stderr, "Error: cannot open input file\n");
-        return 1;
-    }
+    int ascending = 1;
+    status_t status = parse_flag(argv[2], &ascending);
     Employee *employees = NULL;
     size_t count = 0;
-    status = read_employees(input, &employees, &count);
-    fclose(input);
-    if (status != STATUS_OK) {
-        fprintf(stderr, "Error: %s\n", status_message(status));
-        return 1;
+    if (status == STATUS_OK) {
+        status = read_employees(argv[1], &employees, &count);
     }
-    if (count > 1) {
-        qsort(employees, count, sizeof *employees, ascending ? compare_ascending : compare_descending);
+    if (status == STATUS_OK) {
+        status = sort_employees(employees, count, ascending);
     }
-    FILE *output = fopen(argv[3], "w");
-    if (output == NULL) {
-        fprintf(stderr, "Error: cannot open output file\n");
-        free(employees);
-        return 1;
-    }
-    status = write_employees(output, employees, count);
-    if (fclose(output) != 0 && status == STATUS_OK) {
-        status = STATUS_FILE_ERROR;
+    if (status == STATUS_OK) {
+        status = write_employees(argv[3], employees, count);
     }
     free(employees);
     if (status != STATUS_OK) {

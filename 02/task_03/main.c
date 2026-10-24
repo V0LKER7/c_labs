@@ -4,76 +4,40 @@
 
 typedef enum {
     STATUS_OK,
-    STATUS_NULL_POINTER,
-    STATUS_INVALID_ARGUMENT,
+    STATUS_NULL_ARGUMENT,
     STATUS_NO_MEMORY,
-    STATUS_FILE_ERROR
-} Status;
+    STATUS_OPEN_FILE,
+    STATUS_READ_ERROR,
+    STATUS_EMPTY_SUBSTRING,
+    STATUS_BAD_ARGUMENTS
+} status_t;
 
 typedef struct {
-    size_t file_index;
     size_t line;
     size_t column;
-} Match;
+} match_t;
 
 typedef struct {
-    Match *items;
+    const char *path;
+    status_t status;
+    match_t *matches;
     size_t count;
-    size_t capacity;
-} Match_list;
+} file_result_t;
 
-void match_list_init(Match_list *list)
-{
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
-
-void match_list_free(Match_list *list)
-{
-    free(list->items);
-    match_list_init(list);
-}
-
-static Status match_list_add(Match_list *list, Match match)
-{
-    if (list->count == list->capacity) {
-        size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
-        Match *temp = realloc(list->items, new_capacity * sizeof *temp);
-        if (temp == NULL) {
-            return STATUS_NO_MEMORY;
-        }
-        list->items = temp;
-        list->capacity = new_capacity;
-    }
-    list->items[list->count++] = match;
-    return STATUS_OK;
-}
-
-static size_t string_length(const char *text)
+static size_t str_len(const char *str)
 {
     size_t length = 0;
-    while (text[length] != '\0') {
+    while (str[length] != '\0') {
         length++;
     }
     return length;
 }
 
-static int matches_at(const char *data, const char *substring, size_t length)
-{
-    for (size_t i = 0; i < length; i++) {
-        if (data[i] != substring[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static Status read_file(const char *path, char **data, size_t *size)
+static status_t read_file(const char *path, char **data, size_t *size)
 {
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
-        return STATUS_FILE_ERROR;
+        return STATUS_OPEN_FILE;
     }
     size_t capacity = 4096;
     size_t length = 0;
@@ -82,143 +46,220 @@ static Status read_file(const char *path, char **data, size_t *size)
         fclose(file);
         return STATUS_NO_MEMORY;
     }
-    size_t read_count;
-    while ((read_count = fread(buffer + length, 1, capacity - length, file)) > 0) {
-        length += read_count;
+    size_t received = 0;
+    do {
         if (length == capacity) {
-            char *temp = realloc(buffer, capacity * 2);
-            if (temp == NULL) {
+            char *tmp = realloc(buffer, capacity * 2);
+            if (tmp == NULL) {
                 free(buffer);
                 fclose(file);
                 return STATUS_NO_MEMORY;
             }
-            buffer = temp;
+            buffer = tmp;
             capacity *= 2;
         }
-    }
+        received = fread(buffer + length, 1, capacity - length, file);
+        length += received;
+    } while (received > 0);
     int failed = ferror(file);
     fclose(file);
     if (failed) {
         free(buffer);
-        return STATUS_FILE_ERROR;
+        return STATUS_READ_ERROR;
     }
     *data = buffer;
     *size = length;
     return STATUS_OK;
 }
 
-static Status search_buffer(const char *data, size_t size, const char *substring,
-                            size_t substring_length, size_t file_index, Match_list *list)
+static int matches_at(const char *text, const char *substring, size_t length)
 {
+    for (size_t i = 0; i < length; i++) {
+        if (text[i] != substring[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static status_t append_match(match_t **matches, size_t *count, size_t *capacity, size_t line, size_t column)
+{
+    if (*count == *capacity) {
+        size_t new_capacity = *capacity == 0 ? 8 : *capacity * 2;
+        match_t *tmp = realloc(*matches, new_capacity * sizeof(match_t));
+        if (tmp == NULL) {
+            return STATUS_NO_MEMORY;
+        }
+        *matches = tmp;
+        *capacity = new_capacity;
+    }
+    (*matches)[*count].line = line;
+    (*matches)[*count].column = column;
+    (*count)++;
+    return STATUS_OK;
+}
+
+static status_t find_matches(const char *text, size_t text_size, const char *substring,
+                             size_t substring_size, match_t **matches, size_t *count)
+{
+    match_t *found = NULL;
+    size_t found_count = 0;
+    size_t capacity = 0;
     size_t line = 1;
     size_t column = 1;
-    for (size_t i = 0; i < size; i++) {
-        if (size - i >= substring_length && matches_at(data + i, substring, substring_length)) {
-            Match match = {file_index, line, column};
-            Status status = match_list_add(list, match);
+    for (size_t i = 0; i < text_size; i++) {
+        if (text_size - i >= substring_size && matches_at(text + i, substring, substring_size)) {
+            status_t status = append_match(&found, &found_count, &capacity, line, column);
             if (status != STATUS_OK) {
+                free(found);
                 return status;
             }
         }
-        if (data[i] == '\n') {
+        if (text[i] == '\n') {
             line++;
             column = 1;
         } else {
             column++;
         }
     }
+    *matches = found;
+    *count = found_count;
     return STATUS_OK;
 }
 
-Status find_in_files(Match_list *list, const char *substring, size_t file_count, ...)
+static status_t search_file(const char *path, const char *substring, file_result_t *result)
 {
-    if (list == NULL || substring == NULL) {
-        return STATUS_NULL_POINTER;
+    char *data = NULL;
+    size_t size = 0;
+    result->path = path;
+    result->matches = NULL;
+    result->count = 0;
+    result->status = read_file(path, &data, &size);
+    if (result->status == STATUS_NO_MEMORY) {
+        return STATUS_NO_MEMORY;
+    }
+    if (result->status != STATUS_OK) {
+        return STATUS_OK;
+    }
+    result->status = find_matches(data, size, substring, str_len(substring), &result->matches, &result->count);
+    free(data);
+    return result->status == STATUS_NO_MEMORY ? STATUS_NO_MEMORY : STATUS_OK;
+}
+
+void free_results(file_result_t *results, size_t count)
+{
+    if (results == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        free(results[i].matches);
+    }
+    free(results);
+}
+
+status_t find_in_files(file_result_t **results, const char *substring, size_t file_count, ...)
+{
+    if (results == NULL || substring == NULL) {
+        return STATUS_NULL_ARGUMENT;
     }
     if (substring[0] == '\0') {
-        return STATUS_INVALID_ARGUMENT;
+        return STATUS_EMPTY_SUBSTRING;
     }
-    size_t substring_length = string_length(substring);
-    Status status = STATUS_OK;
+    if (file_count == 0) {
+        return STATUS_BAD_ARGUMENTS;
+    }
+    file_result_t *array = calloc(file_count, sizeof(file_result_t));
+    if (array == NULL) {
+        return STATUS_NO_MEMORY;
+    }
+    status_t status = STATUS_OK;
     va_list args;
     va_start(args, file_count);
     for (size_t i = 0; i < file_count && status == STATUS_OK; i++) {
         const char *path = va_arg(args, const char *);
         if (path == NULL) {
-            status = STATUS_NULL_POINTER;
-            break;
-        }
-        char *data = NULL;
-        size_t size = 0;
-        status = read_file(path, &data, &size);
-        if (status == STATUS_OK) {
-            status = search_buffer(data, size, substring, substring_length, i, list);
-            free(data);
+            status = STATUS_NULL_ARGUMENT;
+        } else {
+            status = search_file(path, substring, &array[i]);
         }
     }
     va_end(args);
-    return status;
+    if (status != STATUS_OK) {
+        free_results(array, file_count);
+        return status;
+    }
+    *results = array;
+    return STATUS_OK;
 }
 
-static void print_matches(const Match_list *list, const char *const *paths, size_t path_count)
+static const char *status_message(status_t status)
 {
-    for (size_t i = 0; i < path_count; i++) {
-        printf("File %s:\n", paths[i]);
-        size_t found = 0;
-        for (size_t j = 0; j < list->count; j++) {
-            if (list->items[j].file_index == i) {
-                printf("  line %zu, column %zu\n", list->items[j].line, list->items[j].column);
-                found++;
-            }
+    switch (status) {
+    case STATUS_NULL_ARGUMENT:
+        return "null argument";
+    case STATUS_NO_MEMORY:
+        return "out of memory";
+    case STATUS_OPEN_FILE:
+        return "cannot open file";
+    case STATUS_READ_ERROR:
+        return "read error";
+    case STATUS_EMPTY_SUBSTRING:
+        return "substring must not be empty";
+    case STATUS_BAD_ARGUMENTS:
+        return "usage: <substring> <file1> [file2 ... file5]";
+    default:
+        return "unknown error";
+    }
+}
+
+static void print_results(const file_result_t *results, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        printf("File: %s\n", results[i].path);
+        if (results[i].status != STATUS_OK) {
+            printf("  error: %s\n", status_message(results[i].status));
+        } else if (results[i].count == 0) {
+            printf("  no occurrences\n");
         }
-        if (found == 0) {
-            printf("  no matches\n");
+        for (size_t k = 0; k < results[i].count; k++) {
+            printf("  line %zu, column %zu\n", results[i].matches[k].line, results[i].matches[k].column);
         }
     }
 }
 
-static int write_sample(const char *path, const char *text)
+int main(int argc, char *argv[])
 {
-    FILE *file = fopen(path, "wb");
-    if (file == NULL) {
-        return 0;
-    }
-    int ok = fputs(text, file) >= 0;
-    return fclose(file) == 0 && ok;
-}
-
-static void run_search(const char *substring, const char *first, const char *second)
-{
-    const char *paths[] = {first, second};
-    Match_list list;
-    match_list_init(&list);
-    printf("Substring: \"%s\"\n", substring);
-    Status status = find_in_files(&list, substring, 2, first, second);
-    if (status == STATUS_OK) {
-        print_matches(&list, paths, 2);
-    } else if (status == STATUS_FILE_ERROR) {
-        printf("Error: cannot read one of the files\n");
-    } else {
-        printf("Error: status %d\n", status);
-    }
-    match_list_free(&list);
-}
-
-int main(void)
-{
-    const char *first = "sample_1.txt";
-    const char *second = "sample_2.txt";
-    if (!write_sample(first, "abc abc\nabcabc\n\tabc  abc") || !write_sample(second, "hello\nworld\nlo wo\nlololo")) {
-        printf("Error: cannot create sample files\n");
+    if (argc < 3 || argc > 7) {
+        fprintf(stderr, "Error: %s\n", status_message(STATUS_BAD_ARGUMENTS));
         return 1;
     }
-    run_search("abc", first, second);
-    run_search("lo", first, second);
-    run_search("lo\nwo", first, second);
-    run_search("  ", first, second);
-    run_search("zzz", first, second);
-    run_search("abc", first, "missing.txt");
-    remove(first);
-    remove(second);
+    size_t file_count = (size_t)(argc - 2);
+    file_result_t *results = NULL;
+    status_t status = STATUS_BAD_ARGUMENTS;
+    switch (file_count) {
+    case 1:
+        status = find_in_files(&results, argv[1], 1, argv[2]);
+        break;
+    case 2:
+        status = find_in_files(&results, argv[1], 2, argv[2], argv[3]);
+        break;
+    case 3:
+        status = find_in_files(&results, argv[1], 3, argv[2], argv[3], argv[4]);
+        break;
+    case 4:
+        status = find_in_files(&results, argv[1], 4, argv[2], argv[3], argv[4], argv[5]);
+        break;
+    case 5:
+        status = find_in_files(&results, argv[1], 5, argv[2], argv[3], argv[4], argv[5], argv[6]);
+        break;
+    default:
+        break;
+    }
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Error: %s\n", status_message(status));
+        return 1;
+    }
+    print_results(results, file_count);
+    free_results(results, file_count);
     return 0;
 }
