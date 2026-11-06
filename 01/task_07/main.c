@@ -1,6 +1,9 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define INITIAL_TOKEN_CAPACITY 32
 #define MAX_DIGITS_PER_CODE 4
@@ -229,6 +232,17 @@ static status_t convert_file(FILE *input, FILE *output)
     return status;
 }
 
+static int is_same_file(const char *first_path, const char *second_path)
+{
+    struct stat first_info;
+    struct stat second_info;
+    if (stat(first_path, &first_info) != 0 || stat(second_path, &second_info) != 0) {
+        return strcmp(first_path, second_path) == 0;
+    }
+    return first_info.st_dev == second_info.st_dev &&
+           first_info.st_ino == second_info.st_ino;
+}
+
 static status_t close_output(FILE *output, status_t status)
 {
     if (fclose(output) != 0 && status == STATUS_OK) {
@@ -240,7 +254,7 @@ static status_t close_output(FILE *output, status_t status)
 static status_t run_merge(const char *first_path, const char *second_path,
                           const char *output_path)
 {
-    if (strcmp(output_path, first_path) == 0 || strcmp(output_path, second_path) == 0) {
+    if (is_same_file(output_path, first_path) || is_same_file(output_path, second_path)) {
         return STATUS_SAME_FILE;
     }
     FILE *first = fopen(first_path, "rb");
@@ -266,7 +280,7 @@ static status_t run_merge(const char *first_path, const char *second_path,
 
 static status_t run_convert(const char *input_path, const char *output_path)
 {
-    if (strcmp(input_path, output_path) == 0) {
+    if (is_same_file(input_path, output_path)) {
         return STATUS_SAME_FILE;
     }
     FILE *input = fopen(input_path, "rb");

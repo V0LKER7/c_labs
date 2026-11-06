@@ -1,6 +1,9 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define INITIAL_LINE_CAPACITY 128
 #define OUTPUT_PREFIX "out_"
@@ -279,10 +282,21 @@ static status_t process_file(char action, FILE *input, FILE *output)
     return status == STATUS_END_OF_FILE ? STATUS_OK : status;
 }
 
+static int is_same_file(const char *first_path, const char *second_path)
+{
+    struct stat first_info;
+    struct stat second_info;
+    if (stat(first_path, &first_info) != 0 || stat(second_path, &second_info) != 0) {
+        return 0;
+    }
+    return first_info.st_dev == second_info.st_dev &&
+           first_info.st_ino == second_info.st_ino;
+}
+
 static status_t run(const options_t *options, const char *input_path,
                     const char *output_path)
 {
-    if (strcmp(input_path, output_path) == 0) {
+    if (strcmp(input_path, output_path) == 0 || is_same_file(input_path, output_path)) {
         return STATUS_SAME_FILE;
     }
     FILE *input = fopen(input_path, "rb");

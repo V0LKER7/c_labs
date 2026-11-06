@@ -1,7 +1,10 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define MIN_BASE 2
 #define MAX_BASE 36
@@ -183,9 +186,19 @@ static status_t process_file(FILE *input, FILE *output)
     return status == STATUS_END_OF_FILE ? STATUS_OK : status;
 }
 
+static int is_same_file(const char *first_path, const char *second_path)
+{
+    struct stat first_stat;
+    struct stat second_stat;
+    if (stat(first_path, &first_stat) != 0 || stat(second_path, &second_stat) != 0) {
+        return 0;
+    }
+    return first_stat.st_dev == second_stat.st_dev && first_stat.st_ino == second_stat.st_ino;
+}
+
 static status_t run(const char *input_path, const char *output_path)
 {
-    if (strcmp(input_path, output_path) == 0) {
+    if (strcmp(input_path, output_path) == 0 || is_same_file(input_path, output_path)) {
         return STATUS_SAME_FILE;
     }
     FILE *input = fopen(input_path, "rb");
